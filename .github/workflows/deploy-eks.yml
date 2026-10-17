@@ -3,13 +3,13 @@ name: Build and Deploy to EKS
 on:
   workflow_dispatch:          # manual only: EKS costs money, so no auto-deploy on every push
   # To deploy on every push to main, uncomment:
-  # push:
-  #   branches: [main]
+  push:
+    branches: [main]
 
 env:
   AWS_REGION: ap-southeast-2
   CLUSTER_NAME: demo-app-eks          # must match var.cluster_name in eks/terraform/variables.tf
-  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/demo-app
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/demoeks-app
 
 concurrency:
   group: eks-deploy

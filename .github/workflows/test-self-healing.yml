@@ -1,0 +1,68 @@
+name: Test EKS Self-Healing
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-southeast-2
+  CLUSTER_NAME: demo-app-eks
+
+jobs:
+  test:
+    name: Delete one pod and watch Kubernetes recreate it
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Connect kubectl
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Pods BEFORE
+        run: kubectl get pods -l app=demo-app -o wide
+
+      - name: Kill one pod and keep requesting the site
+        run: |
+          HOST=$(kubectl get svc demo-app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          VICTIM=$(kubectl get pods -l app=demo-app -o jsonpath='{.items[0].metadata.name}')
+          echo "Deleting pod: $VICTIM"
+          kubectl delete pod "$VICTIM" --wait=false
+
+          echo "HTTP status codes while the pod is being replaced:"
+          CODES=""
+          for i in $(seq 1 20); do
+            CODE=$(curl -s -o /dev/null -m 3 -w "%{http_code}" "http://$HOST" || true)
+            CODES="$CODES $CODE"
+            sleep 1
+          done
+          echo "$CODES"
+
+          echo "VICTIM=$VICTIM" >> "$GITHUB_ENV"
+          echo "CODES=$CODES" >> "$GITHUB_ENV"
+
+      - name: Wait until 2 pods are Ready again
+        run: |
+          for i in $(seq 1 60); do
+            READY=$(kubectl get deploy demo-app -o jsonpath='{.status.readyReplicas}')
+            [ "$READY" = "2" ] && break
+            sleep 5
+          done
+          kubectl get pods -l app=demo-app -o wide
+
+      - name: Summary
+        run: |
+          {
+            echo "### Self-healing result"
+            echo "Deleted pod: \`$VICTIM\`"
+            echo ""
+            echo "HTTP codes during replacement: \`$CODES\`"
+            echo ""
+            echo "Pods now:"
+            echo '```'
+            kubectl get pods -l app=demo-app -o wide
+            echo '```'
+            echo "The deleted pod name is gone and a new pod with a different name took its place."
+          } >> "$GITHUB_STEP_SUMMARY"

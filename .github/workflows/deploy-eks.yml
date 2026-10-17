@@ -1,0 +1,125 @@
+name: Build and Deploy to EKS
+
+on:
+  workflow_dispatch:          # manual only: EKS costs money, so no auto-deploy on every push
+  # To deploy on every push to main, uncomment:
+  # push:
+  #   branches: [main]
+
+env:
+  AWS_REGION: ap-southeast-2
+  CLUSTER_NAME: demo-app-eks          # must match var.cluster_name in eks/terraform/variables.tf
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/demo-app
+
+concurrency:
+  group: eks-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build & push Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+
+  infra:
+    name: Terraform (VPC + EKS + 2 nodes)
+    needs: build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: eks/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - name: Terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform apply
+        run: |
+          terraform apply -auto-approve \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="cluster_name=${{ env.CLUSTER_NAME }}"
+
+  deploy:
+    name: Deploy app to Kubernetes
+    needs: infra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Connect kubectl to the cluster
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Wait for 2 nodes to be Ready
+        run: |
+          kubectl wait --for=condition=Ready nodes --all --timeout=300s
+          kubectl get nodes -o wide
+
+      - name: Apply manifests
+        run: |
+          sed -i "s|IMAGE_PLACEHOLDER|${IMAGE_NAME}:${GITHUB_SHA}|" eks/k8s/deployment.yaml
+          kubectl apply -f eks/k8s/
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/demo-app --timeout=300s
+          kubectl get pods -l app=demo-app -o wide
+
+      - name: Show app URL
+        run: |
+          for i in $(seq 1 30); do
+            HOST=$(kubectl get svc demo-app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            [ -n "$HOST" ] && break
+            echo "Waiting for load balancer address... ($i/30)"
+            sleep 10
+          done
+          echo "App URL: http://$HOST"
+          {
+            echo "### App URL"
+            echo "http://$HOST"
+            echo ""
+            echo "The load balancer DNS can take 2-3 minutes to start working."
+            echo ""
+            echo "### Nodes and pods"
+            echo '```'
+            kubectl get nodes
+            echo ""
+            kubectl get pods -l app=demo-app -o wide
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

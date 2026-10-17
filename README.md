@@ -23,6 +23,7 @@ Deploy a containerised web app to **Amazon EKS** with **GitHub Actions** and **T
 - [Cleanup](#cleanup)
 - [Cost](#cost)
 - [Troubleshooting](#troubleshooting)
+- [Viewing Pods and Nodes in the AWS Console](#viewing-pods-and-nodes-in-the-aws-console)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -186,6 +187,102 @@ Running it for a day costs a few dollars.
 | `ImagePullBackOff`                                   | The Docker Hub repository is not public, or the image tag does not exist.                                  |
 | Load balancer URL does not open                      | Wait 2–3 minutes. Check `kubectl get svc demo-app`.                                                        |
 | Destroy fails on VPC or subnets                      | A load balancer is still alive. Delete it in **EC2 → Load Balancers**, then re-run destroy.                |
+| Console shows no Pods or Nodes for the cluster       | Your console identity has no access entry. See [Viewing Pods and Nodes in the AWS Console](#viewing-pods-and-nodes-in-the-aws-console). |
+
+## Viewing Pods and Nodes in the AWS Console
+
+The cluster is created by the `github-actions` IAM user (`user/sonu`), and by default only that identity can read Kubernetes objects. If you open **EKS → Clusters → demo-app-eks** in the console and **Pods** and **Nodes** do not load, the identity you are signed in with has no access entry.
+
+### Step 1: Check who you are signed in as
+
+Click your name in the top right of the console, or run this in CloudShell:
+
+```bash
+aws sts get-caller-identity
+```
+
+The result tells you which fix to use:
+
+| You are signed in as                                      | Example output                                                         | Fix                                  |
+| --------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------ |
+| An assumed role                                           | `arn:aws:sts::024687770252:assumed-role/AccountFullAccessRole/c41874e8-...` | [Option A](#option-a-add-an-access-entry-for-the-role) |
+| The root user                                             | `arn:aws:iam::024687770252:root`                                       | [Option B](#option-b-you-are-the-root-user) |
+
+In this project the console session is a **role** called `AccountFullAccessRole`, not `sonu`. The cluster only trusts `user/sonu`, so the console cannot read pods and nodes until the role is added as an access entry.
+
+### Option A: Add an access entry for the role
+
+**1. Copy the role's exact ARN from the IAM page, not from CloudShell**
+
+1. Open **IAM → Roles**.
+2. Search for `AccountFullAccessRole` and click it.
+3. Copy the ARN from the **Summary** box using the copy icon.
+
+The role's ARN has a path in it. CloudShell drops the path, so the CloudShell version (`role/AccountFullAccessRole`) will not match. Use this exact value:
+
+```
+arn:aws:iam::024687770252:role/managed/AccountFullAccessRole
+```
+
+**2. Create the access entry**
+
+1. Open **EKS → Clusters → demo-app-eks → Access**.
+2. Under **IAM access entries**, click **Create**.
+3. In **IAM principal ARN**, paste the ARN above (or pick the role from the dropdown). Leave **Type** as `Standard`, then click **Next**.
+4. For **Policy name**, choose `AmazonEKSClusterAdminPolicy`. Set **Access scope** to `Cluster`, click **Add policy**, then **Next**.
+5. Click **Create**.
+
+**3. Refresh**
+
+Wait about 20 seconds, then open the cluster's main page and reload it. **Pods** and **Nodes** should now show numbers. The **Resources** tab in the left menu lets you browse your pods and the Deployment.
+
+If the console rejects the ARN with the path in it, try this instead:
+
+```
+arn:aws:iam::024687770252:role/AccountFullAccessRole
+```
+
+### Option B: You are the root user
+
+EKS does not allow the root user as an access entry, so you cannot add it. Use one of these instead:
+
+1. **Sign in to the console as `sonu`.**
+   - Open **IAM → Users → sonu → Security credentials**.
+   - Under **Console sign-in**, click **Enable console access** and set a password.
+   - Sign out, then sign in with the IAM user sign-in link, using account ID `024687770252`, user `sonu` and that password.
+   - Open **EKS → demo-app-eks**. Pods and Nodes should now load.
+2. **Skip the console and use `kubectl` on your computer** with the same access keys as the GitHub secrets:
+
+   ```bash
+   aws configure   # use the github-actions user's keys
+   aws eks update-kubeconfig --name demo-app-eks --region ap-southeast-2
+   kubectl get nodes
+   kubectl get pods -o wide
+   ```
+
+### Optional: Make Terraform create the access entry on every deploy
+
+Without this, you have to repeat the console steps whenever the cluster is destroyed and recreated. Add this to `eks/terraform/` (adjust `aws_eks_cluster.main` to the name of your cluster resource):
+
+```hcl
+resource "aws_eks_access_entry" "console_role" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = "arn:aws:iam::024687770252:role/managed/AccountFullAccessRole"
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "console_role_admin" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = aws_eks_access_entry.console_role.principal_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+}
+```
+
+If the cluster already has an access entry for this role from the console, delete that entry first (or import it) so Terraform does not fail with a "resource already exists" error.
 
 ## Contributing
 

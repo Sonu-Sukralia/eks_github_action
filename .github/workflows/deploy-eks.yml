@@ -3,8 +3,8 @@ name: Build and Deploy to EKS
 on:
   workflow_dispatch:          # manual only: EKS costs money, so no auto-deploy on every push
   # To deploy on every push to main, uncomment:
-  push:
-    branches: [main]
+  # push:
+  #   branches: [main]
 
 env:
   AWS_REGION: ap-southeast-2
